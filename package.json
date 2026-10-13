@@ -3,25 +3,33 @@
   "version": "1.0.0",
   "type": "module",
   "description": "Lightweight Spotify downloader and API wrapper.",
-  "main": "dist/cjs/index.js",
-  "module": "dist/esm/index.js",
-  "types": "dist/types/index.d.ts",
+  "main": "dist/index.cjs",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
   "exports": {
-    "require": "./dist/cjs/index.js",
-    "import": "./dist/esm/index.js"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.cjs",
+      "import": "./dist/index.js"
+    }
   },
   "files": [
     "dist",
+    "proto",
+    "LICENSE",
     "README.md",
     "package.json"
   ],
   "scripts": {
     "dev": "tsup src/index.ts --dts --format esm,cjs --watch",
-    "build": "tsup src/index.ts --dts --format esm,cjs"
+    "build": "tsup src/index.ts --dts --format esm,cjs --clean",
+    "prepare": "yarn build",
+    "prepack": "yarn build",
+    "test": "node --test test/*.test.cjs"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/PwLDev/node-spdl.git"
+    "url": "git+https://github.com/equizno345/node-spdl.git"
   },
   "keywords": [
     "spdl",
@@ -42,9 +50,10 @@
   ],
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/PwLDev/node-spdl/issues"
+    "url": "https://github.com/equizno345/node-spdl/issues"
   },
-  "homepage": "https://github.com/PwLDev/node-spdl#readme",
+  "homepage": "https://github.com/equizno345/node-spdl#readme",
+  "engines": { "node": ">=22.12" },
   "dependencies": {
     "@spdl/unplayplay": "^1.0.9",
     "@spdl/widevine": "^0.3.1",

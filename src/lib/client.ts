@@ -7,7 +7,7 @@ import { ArtistClient } from "./artist.js";
 import { Endpoints, AudioType, premiumFormats } from "./const.js";
 import { PlayableContentStreamer } from "./content.js";
 import { createSpotifyEntity, EpisodeEntity, PlayableEntity, TrackEntity } from "./entity.js";
-import { SpotifyAuthError, SpotifyError, SpotifyStreamError } from "./errors.js";
+import { SpotifyApiError, SpotifyAuthError, SpotifyError, SpotifyStreamError } from "./errors.js";
 import { PlaylistClient } from "./playlist.js";
 import { PlayPlayClient } from "./playplay.js";
 import { PodcastClient } from "./podcast.js";
@@ -112,8 +112,9 @@ export class Spotify {
             "Accept-Language": "*",
             "Connection": "keep-alive",
             "Content-Type": "application/json",
-            "Origin": "open.spotify.com",
-            "Referer": "open.spotify.com",
+            "Origin": "https://open.spotify.com",
+            "Referer": "https://open.spotify.com/",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
             "app-platform": "WebPlayer"
         }
     }
@@ -145,11 +146,12 @@ export class Spotify {
      */
     public async refreshToken(): Promise<void> {
         const now = Date.now();
-        if (now < this.clientExpiration) return;
+        if (now < this.accessExpiration && this.accessToken) return;
 
         const { otp, version } = await getSpotifyTotp();
         const headers = {
-            "Referer": "https://open.spotify.com"
+            "Referer": "https://open.spotify.com",
+            "User-Agent": this.getHeaders()["User-Agent"]
         };
         if (this.cookie.length) {
             Object.assign(headers, { "Cookie": this.cookie });
@@ -160,6 +162,8 @@ export class Spotify {
             {
                 headers,
                 method: "GET",
+                headersTimeout: 15000,
+                bodyTimeout: 15000,
                 query: {
                     reason: "transport",
                     productType: "web-player",
@@ -170,12 +174,18 @@ export class Spotify {
             }
         );
 
+        if (tokenRequest.statusCode !== 200) {
+            await tokenRequest.body.dump();
+            throw new SpotifyApiError(tokenRequest.statusCode, "Spotify login request failed");
+        }
         const response: any = await tokenRequest.body.json();
         const isAnonymous = response["isAnonymous"];
 
         if (isAnonymous) {
             throw new SpotifyAuthError("You must provide a valid sp_dc cookie from a Spotify logged in browser.\nRefer to https://github.com/PwLDev/node-spdl#readme to see how to extract a cookie.");
         }
+        if (typeof response.accessToken !== "string" || !response.accessToken || !Number.isFinite(response.accessTokenExpirationTimestampMs))
+            throw new SpotifyError("Spotify login is temporarily unavailable");
 
         this.accessToken = response["accessToken"];
         this.clientId = response["clientId"];
@@ -209,17 +219,35 @@ export class Spotify {
         this.clientExpiration = now + (clientResponse["granted_token"]["refresh_after_seconds"] * 1000);
     }
 
-    public async request(endpoint: string): Promise<any> {
+    public async request(endpoint: string, body?: Record<string, unknown>): Promise<any> {
         if (!this.accessToken.length) {
             throw new SpotifyAuthError("This client is not authenticated yet.");
         }
 
-        const request = await undici.request(endpoint, {
+        const request = await undici.fetch(endpoint, {
             headers: this.getHeaders(),
-            method: "GET"
+            method: body ? "POST" : "GET",
+            ...(body ? {body: JSON.stringify(body)} : {}),
+            redirect: "error",
+            signal: AbortSignal.timeout(15000)
         });
-
-        return await request.body.json();
+        const chunks: Buffer[] = [];
+        let length = 0;
+        const reader = request.body?.getReader();
+        if (!reader) throw new SpotifyError("Spotify returned an empty response");
+        while (true) {
+            const {done, value} = await reader.read();
+            if (done) break;
+            length += value.length;
+            if (length > 8 * 1024 * 1024) {
+                await reader.cancel();
+                throw new SpotifyError("Spotify response exceeded the metadata size limit");
+            }
+            chunks.push(Buffer.from(value));
+        }
+        if (!request.ok)
+            throw new SpotifyApiError(request.status, "Spotify metadata request failed", request.headers.get("retry-after") || undefined);
+        return JSON.parse(Buffer.concat(chunks).toString("utf8"));
     }
 
     private async getClientPayload() {

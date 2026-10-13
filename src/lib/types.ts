@@ -214,6 +214,7 @@ export interface Track extends SpotifyObject {
 	discNumber: string;
 	durationMs: number;
 	isLocal: boolean;
+	isPlayable?: boolean;
 	explicit: boolean;
 }
 
