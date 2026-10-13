@@ -1,6 +1,6 @@
 {
   "name": "spdl",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
   "description": "Lightweight Spotify downloader and API wrapper.",
   "main": "dist/index.cjs",

@@ -21,7 +21,7 @@ export const parseAlbum = (payload: Record<string, any>): Album => {
 		id: payload["id"],
 		uri: payload["uri"],
 		externalUrl: payload["external_urls"]?.["spotify"] || "",
-		name: payload["name"],
+		name: payload["name"] || "",
 		releaseDate: new Date(payload["release_date"]),
 		images: payload["images"] || payload["coverArt"]?.["sources"] || [],
 		availableMarkets: payload["availableMarkets"],

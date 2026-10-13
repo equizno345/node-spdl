@@ -3,10 +3,10 @@
 This fork keeps the original node-spdl API and PwLDev's MIT attribution. Install directly from GitHub with Yarn using a pinned revision:
 
 ```sh
-yarn add spdl@github:equizno345/node-spdl#<commit-sha>
+yarn add spdl@git+https://github.com/equizno345/node-spdl.git#<commit-sha>
 ```
 
-Git installs build through `prepare`; package archives build through `prepack`. The generated CommonJS, ESM and TypeScript entrypoints and original protobuf assets are included in the package. Use Node 22 or newer. Validate with `yarn build && yarn test`.
+Use the explicit Git URL: Yarn Classic's `github:owner/repo` shorthand downloads a source archive without building it. Git installs build through `prepare`; package archives build through `prepack`. The generated CommonJS, ESM and TypeScript entrypoints and original protobuf assets are included in the package. Use Node 22 or newer. Validate with `yarn build && yarn test`. Alpine build stages need `git python3 make g++` for Git preparation and the original native dependency; these tools are not needed in the final runtime image.
 A lightweight Spotify downloader and API wrapper package.
 Written in Typescript, designed for Node.js, with native Node components.
 
