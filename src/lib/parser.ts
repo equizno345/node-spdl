@@ -14,6 +14,7 @@ import {
 	TrackMetadata, 
 	User
 } from "./types";
+import { SpotifyError } from "./errors.js";
 
 export const parseAlbum = (payload: Record<string, any>): Album => {
     payload = payload || {};
@@ -222,12 +223,18 @@ export const parseTrackFile = (payload: Record<string, any>): TrackFile => {
 }
 
 export const parseTrackMetadata = (payload: Record<string, any>): TrackMetadata => {
+    const alternatives = Array.isArray(payload?.alternative) ? payload.alternative : [];
+    const files = payload?.file?.length ? payload.file : alternatives.find(item => Array.isArray(item?.file) && item.file.length)?.file ?? payload?.file ?? [];
+    const preview = payload?.preview?.length ? payload.preview : alternatives.find(item => Array.isArray(item?.preview) && item.preview.length)?.preview ?? payload?.preview ?? [];
+    if (!payload || !Array.isArray(files) || !Array.isArray(preview) ||
+        [...files, ...preview].some(file => !file || typeof file.file_id !== "string" || typeof file.format !== "string"))
+        throw new SpotifyError("Invalid Spotify audio metadata response");
     const track: TrackMetadata = {
 		gid: payload["gid"],
 		name: payload["name"],
 		album: payload["album"],
-		files: payload["file"] ? payload["file"].map(parseTrackFile) : payload["alternative"][0]["file"].map(parseTrackFile),
-		preview: payload["preview"] ? payload["preview"].map(parseTrackFile) : payload["alternative"][0]["preview"].map(parseTrackFile),
+		files: files.map(parseTrackFile),
+		preview: preview.map(parseTrackFile),
 		hasLyrics: payload["has_lyrics"] || false,
 		languages: payload["languages"],
 		restriction: payload["restriction"]

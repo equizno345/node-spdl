@@ -219,15 +219,17 @@ export class Spotify {
         this.clientExpiration = now + (clientResponse["granted_token"]["refresh_after_seconds"] * 1000);
     }
 
-    public async request(endpoint: string, body?: Record<string, unknown>): Promise<any> {
+    public async request(endpoint: string, body?: Record<string, unknown> | Uint8Array, options: {protobuf?: boolean} = {}): Promise<any> {
         if (!this.accessToken.length) {
             throw new SpotifyAuthError("This client is not authenticated yet.");
         }
 
         const request = await undici.fetch(endpoint, {
-            headers: this.getHeaders(),
+            headers: {...this.getHeaders(), ...(options.protobuf ? {
+                "Accept": "application/x-protobuf", "Content-Type": "application/x-protobuf"
+            } : {})},
             method: body ? "POST" : "GET",
-            ...(body ? {body: JSON.stringify(body)} : {}),
+            ...(body ? {body: body instanceof Uint8Array ? Buffer.from(body) : JSON.stringify(body)} : {}),
             redirect: "error",
             signal: AbortSignal.timeout(15000)
         });
@@ -247,7 +249,8 @@ export class Spotify {
         }
         if (!request.ok)
             throw new SpotifyApiError(request.status, "Spotify metadata request failed", request.headers.get("retry-after") || undefined);
-        return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        const data = Buffer.concat(chunks);
+        return options.protobuf ? data : JSON.parse(data.toString("utf8"));
     }
 
     private async getClientPayload() {

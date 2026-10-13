@@ -3,6 +3,64 @@ const assert = require('node:assert/strict');
 const {execFileSync} = require('node:child_process');
 const {Spotify, SpotifyApiError, SpotifyError} = require('spdl');
 const undici = require('undici');
+const protobuf = require('protobufjs');
+const audioProtocol = protobuf.parse(`syntax = "proto3";
+message Any {string type_url=1;bytes value=2;}
+message Header {int32 status_code=1;}
+message Entry {Header header=1;string entity_uri=2;Any extension_data=3;}
+message Extension {int32 extension_kind=2;repeated Entry extension_data=3;}
+message Batch {repeated Extension extended_metadata=2;}
+message File {bytes file_id=1;int32 format=2;}
+message ExtendedFile {File file=1;}
+message Files {repeated ExtendedFile files=1;}
+message Query {int32 extension_kind=1;}
+message EntityRequest {string entity_uri=1;repeated Query query=2;}
+message Request {repeated EntityRequest entity_request=2;}
+`).root;
+test('audio metadata keeps legacy files and tolerates missing previews and alternatives',async()=>{
+  const client=new Spotify({accessToken:'fixture-token'});
+  const file={file_id:'a'.repeat(40),format:'OGG_VORBIS_160'};
+  for(const payload of [{file:[file]},{alternative:[{}, {file:[file]}]}, {file:[],alternative:[{file:[file]}]},{}]){
+    client.request=async()=>({gid:'0'.repeat(32),name:'Track',...payload});
+    const metadata=await client.tracks.getMetadata('0'.repeat(32));
+    assert.deepEqual(metadata.preview,[]);
+    assert.equal(metadata.files.length,Object.keys(payload).length?1:0);
+  }
+});
+test('new audio metadata resolves authenticated AUDIO_FILES protobuf without inventing IDs',async()=>{
+  const client=new Spotify({accessToken:'fixture-token'});
+  const gid='0'.repeat(31)+'1',uri='spotify:track:'+'0'.repeat(21)+'1';
+  const files=audioProtocol.lookupType('Files').encode({files:[{file:{fileId:Buffer.alloc(20,1),format:1}}]}).finish();
+  const response=(status=200,entityUri=uri)=>audioProtocol.lookupType('Batch').encode({extendedMetadata:[{extensionKind:5,extensionData:[{header:{statusCode:status},entityUri,extensionData:{typeUrl:'type.googleapis.com/spotify.extendedmetadata.audiofiles.AudioFilesExtensionResponse',value:files}}]}]}).finish();
+  let reply=response();
+  client.request=async(endpoint,body,options)=>{
+    if(endpoint.includes('/metadata/4/track/'))return {gid,name:'Track',audio_formats:[{original_audio:{uuid:'original-uuid',format:'AUDIO_FORMAT_STEREO'}}]};
+    assert.equal(endpoint,require('spdl').Endpoints.EXTENDED_METADATA);
+    assert.equal(options.protobuf,true);
+    const request=audioProtocol.lookupType('Request').decode(body);
+    assert.equal(request.entityRequest[0].entityUri,uri);
+    assert.equal(request.entityRequest[0].query[0].extensionKind,5);
+    return reply;
+  };
+  const metadata=await client.tracks.getMetadata(gid);
+  assert.deepEqual(metadata.files,[{fileId:'01'.repeat(20),format:'OGG_VORBIS_160'}]);
+  assert.deepEqual(metadata.preview,[]);
+  reply=response(403);await assert.rejects(client.tracks.getMetadata(gid),error=>error instanceof SpotifyApiError && error.statusCode===403);
+  reply=response(200,'spotify:track:another');await assert.rejects(client.tracks.getMetadata(gid),SpotifyError);
+  reply=Buffer.from([255]);await assert.rejects(client.tracks.getMetadata(gid),SpotifyError);
+});
+test('protobuf requests preserve authorization, binary bodies, and genuine HTTP throttling',async()=>{
+  const agent=new undici.MockAgent();agent.disableNetConnect();
+  const previous=undici.getGlobalDispatcher();undici.setGlobalDispatcher(agent);
+  try{
+    agent.get('https://spclient.wg.spotify.com').intercept({path:'/extended-metadata/v0/extended-metadata',method:'POST',headers:{authorization:'Bearer fixture-token','content-type':'application/x-protobuf',accept:'application/x-protobuf'}}).reply(200,Buffer.from([1,2,3]));
+    const client=new Spotify({accessToken:'fixture-token'});
+    assert.deepEqual(await client.request(require('spdl').Endpoints.EXTENDED_METADATA,Buffer.from([1]),{protobuf:true}),Buffer.from([1,2,3]));
+    agent.get('https://spclient.wg.spotify.com').intercept({path:'/extended-metadata/v0/extended-metadata',method:'POST'}).reply(429,'',{headers:{'retry-after':'58'}});
+    await assert.rejects(client.request(require('spdl').Endpoints.EXTENDED_METADATA,Buffer.from([1]),{protobuf:true}),error=>error.statusCode===429 && error.retryAfter==='58');
+    agent.assertNoPendingInterceptors();
+  }finally{undici.setGlobalDispatcher(previous);await agent.close();}
+});
 test('account metadata uses authenticated web-player queries and keeps the public user shape', async()=>{
   const client=new Spotify({accessToken:'fixture-token'});
   const operations=[];

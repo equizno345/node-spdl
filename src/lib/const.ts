@@ -7,6 +7,7 @@ export const Endpoints = {
     HOME_PAGE: "https://open.spotify.com/",
     EPISODES: "https://api.spotify.com/v1/episodes/",
     EPISODE_METADATA: "https://spclient.wg.spotify.com/metadata/4/episode/",
+    EXTENDED_METADATA: "https://spclient.wg.spotify.com/extended-metadata/v0/extended-metadata",
     FOLLOWED_ARTISTS_URL: "https://api.spotify.com/v1/me/following?type=artist",
     ME: "https://api.spotify.com/v1/me",
     PLAYLISTS: "https://api.spotify.com/v1/playlists/",
