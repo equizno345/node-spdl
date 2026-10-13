@@ -7,6 +7,8 @@ yarn add spdl@git+https://github.com/equizno345/node-spdl.git#<commit-sha>
 ```
 
 Use the explicit Git URL: Yarn Classic's `github:owner/repo` shorthand downloads a source archive without building it. Git installs build through `prepare`; package archives build through `prepack`. The generated CommonJS, ESM and TypeScript entrypoints and original protobuf assets are included in the package. Use Node 22 or newer. Validate with `yarn build && yarn test`. Alpine build stages need `git python3 make g++` for Git preparation and the original native dependency; these tools are not needed in the final runtime image.
+
+The original PlayPlay client uses `options.unplayplay` for both its request token and its paired key operation. License failures throw `SpotifyApiError` with the HTTP `statusCode`, optional `retryAfter`, and an opaque `providerCode` when Spotify supplies one. A 403 is not translated into a claim about Premium status or token validity; provider code meanings are not inferred. License key material is not logged. A configured provider still needs to be accepted by Spotify; honoring the override does not guarantee a successful download.
 A lightweight Spotify downloader and API wrapper package.
 Written in Typescript, designed for Node.js, with native Node components.
 

@@ -11,7 +11,8 @@ export class SpotifyApiError extends Error {
     constructor(
         public readonly statusCode: number,
         message: string,
-        public readonly retryAfter?: string
+        public readonly retryAfter?: string,
+        public readonly providerCode?: number
     ) {
         super();
         this.message = `Request failed with code ${statusCode || "unknown"} (${message})`;

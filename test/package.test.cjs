@@ -17,6 +17,49 @@ message Query {int32 extension_kind=1;}
 message EntityRequest {string entity_uri=1;repeated Query query=2;}
 message Request {repeated EntityRequest entity_request=2;}
 `).root;
+test('PlayPlay uses the configured provider for both the request token and key operation without logging keys',async()=>{
+  const agent=new undici.MockAgent();agent.disableNetConnect();
+  const previous=undici.getGlobalDispatcher();undici.setGlobalDispatcher(agent);
+  const fileId='a'.repeat(40),token=Buffer.alloc(16,7),obfuscated=Buffer.alloc(16,8),key=Buffer.alloc(16,9);
+  const proto=protobuf.parse('syntax="proto3";message Request{int32 version=1;bytes token=2;}message Response{bytes obfuscated_key=1;}').root;
+  const originalLog=console.log;const logs=[];console.log=(...args)=>logs.push(args);
+  try{
+    const provider={token,deobfuscateKey(actualFile,actualKey){assert.equal(this,provider);assert.deepEqual(actualFile,Buffer.from(fileId,'hex'));assert.deepEqual(actualKey,obfuscated);return key;}};
+    const client=new Spotify({accessToken:'fixture-token',unplayplay:provider});
+    agent.get('https://spclient.wg.spotify.com').intercept({path:'/playplay/v1/key/'+fileId,method:'POST',body:body=>{
+      const decoded=proto.lookupType('Request').decode(Buffer.from(body));return decoded.version===2 && Buffer.from(decoded.token).equals(token);
+    }}).reply(200,Buffer.from(proto.lookupType('Response').encode({obfuscatedKey:obfuscated}).finish()));
+    assert.deepEqual(await client.playplay.getKey(fileId,1),key);
+    assert.deepEqual(logs,[]);agent.assertNoPendingInterceptors();
+  }finally{console.log=originalLog;undici.setGlobalDispatcher(previous);await agent.close();}
+});
+test('PlayPlay preserves HTTP status, opaque provider code and Retry-After without guessing a Premium requirement',async()=>{
+  const agent=new undici.MockAgent();agent.disableNetConnect();
+  const previous=undici.getGlobalDispatcher();undici.setGlobalDispatcher(agent);
+  try{
+    const client=new Spotify({accessToken:'fixture-token'});
+    client.user.isPremium=async()=>{throw new Error('License errors must not request account metadata');};
+    agent.get('https://spclient.wg.spotify.com').intercept({path:'/playplay/v1/key/'+ 'a'.repeat(40),method:'POST'}).reply(403,Buffer.from([8,3]));
+    await assert.rejects(client.playplay.getKey('a'.repeat(40),1),error=>error instanceof SpotifyApiError && error.statusCode===403 && error.providerCode===3 && !error.message.includes('token invalid'));
+    agent.get('https://spclient.wg.spotify.com').intercept({path:'/playplay/v1/key/'+ 'a'.repeat(40),method:'POST'}).reply(429,Buffer.from([8,7]),{headers:{'retry-after':'58'}});
+    await assert.rejects(client.playplay.getKey('a'.repeat(40),1),error=>error.statusCode===429 && error.retryAfter==='58');
+    agent.assertNoPendingInterceptors();
+  }finally{undici.setGlobalDispatcher(previous);await agent.close();}
+});
+test('PlayPlay rejects missing keys and malformed provider results before downstream decryption',async()=>{
+  const agent=new undici.MockAgent();agent.disableNetConnect();
+  const previous=undici.getGlobalDispatcher();undici.setGlobalDispatcher(agent);
+  try{
+    const provider={token:Buffer.alloc(16),deobfuscateKey(){return Buffer.alloc(0);}};
+    const client=new Spotify({accessToken:'fixture-token',unplayplay:provider});
+    const pool=agent.get('https://spclient.wg.spotify.com');
+    pool.intercept({path:'/playplay/v1/key/'+ 'a'.repeat(40),method:'POST'}).reply(200,Buffer.alloc(0));
+    await assert.rejects(client.playplay.getKey('a'.repeat(40),1),/No PlayPlay key/);
+    pool.intercept({path:'/playplay/v1/key/'+ 'a'.repeat(40),method:'POST'}).reply(200,Buffer.from([10,1,1]));
+    await assert.rejects(client.playplay.getKey('a'.repeat(40),1),/invalid audio key/);
+    agent.assertNoPendingInterceptors();
+  }finally{undici.setGlobalDispatcher(previous);await agent.close();}
+});
 test('audio metadata keeps legacy files and tolerates missing previews and alternatives',async()=>{
   const client=new Spotify({accessToken:'fixture-token'});
   const file={file_id:'a'.repeat(40),format:'OGG_VORBIS_160'};
