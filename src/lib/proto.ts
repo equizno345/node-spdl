@@ -22,17 +22,11 @@ export const resolveProto = async (
 }
 
 const resolveProtoPath = (filename: string): string => {
-	if (typeof __dirname !== "undefined") {
-		return path.join(__dirname, "../proto", filename);
-	// @ts-ignore
-	} else if (typeof import.meta !== "undefined" && import.meta.url) {
-		// @ts-ignore
-		const __filename = fileURLToPath(import.meta.url);
-		const __dirname = path.dirname(__filename);
-		return path.join(__dirname, "../proto", filename);
-	} else {
-		throw new Error("Unable to resolve proto path. Unsupported module environment.");
-	}
+    // Prefer the module URL: CommonJS callers can expose a global __dirname to ESM.
+    if (import.meta.url) {
+        return path.join(path.dirname(fileURLToPath(import.meta.url)), "../proto", filename);
+    }
+    return path.join(__dirname, "../proto", filename);
 }
 
 const playplay = proto.loadSync(resolveProtoPath("playplay.proto"));

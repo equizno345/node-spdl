@@ -73,5 +73,7 @@ test('original request exposes provider status and Retry-After without returning
 });
 test('package entry loads outside the repository working directory',()=>{
   const entry=require.resolve('spdl');
+  const esm=require('node:url').pathToFileURL(require('node:path').join(require('node:path').dirname(entry),'index.js')).href;
+  execFileSync(process.execPath,['-e', "import("+JSON.stringify(esm)+").then(m=>require(\"node:assert/strict\").equal(typeof m.Spotify,\"function\"));"],{cwd:require('node:os').tmpdir(),stdio:'pipe'});
   execFileSync(process.execPath,['-e',`const assert=require('node:assert/strict'); assert.equal(typeof require(${JSON.stringify(entry)}).Spotify,'function');`],{cwd:require('node:os').tmpdir(),stdio:'pipe'});
 });
