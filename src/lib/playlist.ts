@@ -8,8 +8,8 @@ import undici from "undici";
 
 export class PlaylistClient {
     readonly client: Spotify;
-    private static hash?: {value: string; expiresAt: number};
-    private static pendingHash?: Promise<string>;
+    private static hashes = new Map<string, {value: string; expiresAt: number}>();
+    private static pendingHashes = new Map<string, Promise<string>>();
 
     constructor(client: Spotify) {
         this.client = client;
@@ -74,11 +74,13 @@ export class PlaylistClient {
         return parsePlaylist({...playlist, content: {...playlist.content, items}});
     }
 
-    private async queryHash(force = false): Promise<string> {
-        const cached = PlaylistClient.hash;
+    /** Shared discovery for the existing web-player metadata methods. */
+    public async queryHash(force = false, operation: "fetchPlaylist" | "getTrack" = "fetchPlaylist"): Promise<string> {
+        const cached = PlaylistClient.hashes.get(operation);
         if (!force && cached && cached.expiresAt > Date.now()) return cached.value;
-        if (PlaylistClient.pendingHash) return PlaylistClient.pendingHash;
-        PlaylistClient.pendingHash = (async () => {
+        const pending = PlaylistClient.pendingHashes.get(operation);
+        if (pending) return pending;
+        const request = (async () => {
             // Inspect public assets as text; never send account credentials or execute JS.
             const text = async (url: string) => {
                 const response = await undici.fetch(url, {headers: {"User-Agent": this.client.getHeaders()["User-Agent"]},
@@ -107,12 +109,13 @@ export class PlaylistClient {
             const bundle = html.match(/https:\/\/open\.spotifycdn\.com\/cdn\/build\/web-player\/web-player\.[a-f0-9]+\.js/)?.[0];
             if (!bundle) throw new SpotifyError("Spotify web player metadata is temporarily unavailable");
             const source = await text(bundle);
-            const hash = source.match(/"fetchPlaylist","query","([a-f0-9]{64})"/)?.[1];
+            const hash = source.match(new RegExp(`"${operation}","query","([a-f0-9]{64})"`))?.[1];
             if (!hash) throw new SpotifyError("Spotify web player metadata is temporarily unavailable");
-            PlaylistClient.hash = {value: hash, expiresAt: Date.now() + 3600000};
+            PlaylistClient.hashes.set(operation, {value: hash, expiresAt: Date.now() + 3600000});
             return hash;
         })();
-        try {return await PlaylistClient.pendingHash;}
-        finally {PlaylistClient.pendingHash = undefined;}
+        PlaylistClient.pendingHashes.set(operation, request);
+        try {return await request;}
+        finally {PlaylistClient.pendingHashes.delete(operation);}
     }
 }

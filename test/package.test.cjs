@@ -51,6 +51,22 @@ test('original playlist get refuses changing and incomplete snapshots',async()=>
     await assert.rejects(client.playlists.get(id),SpotifyError);
   }
 });
+test('original track get reads current single-track metadata and retries a stale query once', async()=>{
+  const client=new Spotify({accessToken:'fixture-token'});
+  const hashes=[];client.playlists.queryHash=async(force,operation)=>{hashes.push({force,operation});return 'b'.repeat(64);};
+  const track={__typename:'Track',uri:'spotify:track:'+id,id,name:'Single',firstArtist:{items:[{profile:{name:'First'}}]},otherArtists:{items:[{profile:{name:'Second'}}]},duration:{totalMilliseconds:123000},albumOfTrack:{name:'Album',coverArt:{sources:[]}},playability:{playable:true}};
+  let calls=0;client.request=async(endpoint,body)=>{
+    assert.equal(body.operationName,'getTrack');assert.equal(body.variables.uri,'spotify:track:'+id);
+    calls++;return calls===1?{errors:[{message:'PersistedQueryNotFound'}]}:{data:{trackUnion:track}};
+  };
+  const result=await client.tracks.get('https://open.spotify.com/track/'+id);
+  assert.deepEqual(result.artists.map(a=>a.name),['First','Second']);assert.equal(result.durationMs,123000);assert.equal(result.isPlayable,true);
+  assert.deepEqual(hashes,[{force:false,operation:'getTrack'},{force:true,operation:'getTrack'}]);
+  client.request=async()=>({data:{trackUnion:{__typename:'NotFound'}}});
+  await assert.rejects(client.tracks.get(id),error=>error instanceof SpotifyApiError&&error.statusCode===404);
+  client.request=async()=>({data:{trackUnion:{...track,uri:'spotify:track:other'}}});
+  await assert.rejects(client.tracks.get(id),SpotifyError);
+});
 test('original playlist get retries a rejected query only once',async()=>{
   const client=new Spotify({accessToken:'fixture-token'});
   const refreshed=[];client.playlists.queryHash=async force=>{refreshed.push(force);return 'a'.repeat(64);};

@@ -3,6 +3,7 @@ import { Endpoints } from "./const.js";
 import { parseLyrics, parseTrack, parseTrackMetadata } from "./parser.js";
 import { ColorLyrics, Track, TrackMetadata } from "./types.js";
 import { getIdFromQuery } from "./url.js";
+import { SpotifyApiError, SpotifyError } from "./errors.js";
 
 export class TrackClient {
     readonly client: Spotify;
@@ -12,7 +13,27 @@ export class TrackClient {
     }
 
     public async get(id: string): Promise<Track> {
-        const track = await this.client.request(`${Endpoints.TRACKS_URL}${id}`);
+        id = getIdFromQuery(id);
+        if (!/^[a-zA-Z0-9]{22}$/.test(id)) throw new SpotifyError("Invalid Spotify track");
+        let hash = await this.client.playlists.queryHash(false, "getTrack");
+        const body = () => ({operationName: "getTrack", variables: {uri: `spotify:track:${id}`},
+            extensions: {persistedQuery: {version: 1, sha256Hash: hash}}});
+        let response: any;
+        try {response = await this.client.request(Endpoints.QUERY, body());}
+        catch (error) {
+            if (!(error instanceof SpotifyApiError && error.statusCode === 412)) throw error;
+            response = {errors: [{message: "PersistedQueryNotFound"}]};
+        }
+        if (response?.errors?.some((error: any) => error.message === "PersistedQueryNotFound")) {
+            hash = await this.client.playlists.queryHash(true, "getTrack");
+            response = await this.client.request(Endpoints.QUERY, body());
+        }
+        if (response?.errors?.length) throw new SpotifyError("Spotify could not read this track");
+        const track = response?.data?.trackUnion;
+        if (!track || ["NotFound", "GenericError"].includes(track.__typename))
+            throw new SpotifyApiError(404, "Spotify track was not found");
+        if (track.uri !== `spotify:track:${id}` || typeof track.name !== "string")
+            throw new SpotifyError("Invalid Spotify track response");
         return parseTrack(track);
     } 
 
