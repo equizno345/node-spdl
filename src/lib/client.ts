@@ -321,7 +321,8 @@ export class Spotify {
                 throw new SpotifyError("An unplayable Spotify entity was provided.");
             }
 
-            this.downloadFromEntity(stream, content, options);
+            this.downloadFromEntity(stream, content, options).catch(error =>
+                stream.destroy(error instanceof Error ? error : new SpotifyError("Spotify download failed")));
         } else {
             stream.destroy();
             throw new SpotifyAuthError("An invalid Spotify URL was provided.");

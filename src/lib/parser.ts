@@ -157,6 +157,14 @@ export const parseReference = (payload: Record<string, any>): MetadataReference 
 }
 
 export const parseSelfUser = (payload: Record<string, any>): SelfUser => {
+	if (payload.account && payload.profile) {
+		const {account, profile} = payload;
+		payload = {id: profile.username, uri: profile.uri || `spotify:user:${profile.username}`,
+			external_urls: {spotify: `https://open.spotify.com/user/${encodeURIComponent(profile.username)}`},
+			display_name: profile.name, country: account.country || "", email: account.email || "",
+			followers: {total: profile.followers?.totalCount ?? profile.followers?.total ?? 0},
+			images: profile.avatar?.sources || [], product: account.product.toLowerCase()};
+	}
 	const user: SelfUser = {
 		id: payload["id"],
 		uri: payload["uri"],

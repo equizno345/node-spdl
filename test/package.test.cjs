@@ -3,6 +3,46 @@ const assert = require('node:assert/strict');
 const {execFileSync} = require('node:child_process');
 const {Spotify, SpotifyApiError, SpotifyError} = require('spdl');
 const undici = require('undici');
+test('account metadata uses authenticated web-player queries and keeps the public user shape', async()=>{
+  const client=new Spotify({accessToken:'fixture-token'});
+  const operations=[];
+  client.playlists.queryHash=async(force,operation)=>{operations.push(operation);return 'c'.repeat(64);};
+  client.request=async(endpoint,body)=>{
+    assert.equal(endpoint,require('spdl').Endpoints.QUERY);
+    assert.deepEqual(body.variables,{});
+    return {data:{me:body.operationName==='accountAttributes'?{account:{product:'PREMIUM',country:'US',attributes:{}}}:{profile:{username:'fixture-user',uri:'spotify:user:fixture-user',name:'Fixture',avatar:{sources:[]}}}}};
+  };
+  const me=await client.user.me();
+  assert.equal(me.id,'fixture-user');assert.equal(me.product,'premium');assert.equal(me.displayName,'Fixture');
+  assert.equal(me.email,'');assert.equal(me.followers,0);
+  operations.length=0;
+  assert.equal(await client.user.isPremium(),true);
+  assert.deepEqual(operations,['accountAttributes']);
+  client.request=async()=>({data:{me:{account:{product:'FREE'}}}});
+  assert.equal(await client.user.isPremium(),false);
+  client.request=async()=>({data:{me:{account:{product:'UNKNOWN'}}}});
+  await assert.rejects(client.user.isPremium(),SpotifyError);
+});
+test('account queries refresh a stale hash once and preserve genuine throttling',async()=>{
+  const client=new Spotify({accessToken:'fixture-token'});
+  const refresh=[];client.playlists.queryHash=async(force)=>{refresh.push(force);return 'd'.repeat(64);};
+  let count=0;client.request=async()=>++count===1?{errors:[{message:'PersistedQueryNotFound'}]}:{data:{me:{account:{product:'FREE'}}}};
+  assert.equal(await client.user.isPremium(),false);assert.deepEqual(refresh,[false,true]);
+  const failure=new SpotifyApiError(429,'Spotify metadata request failed','58');
+  client.request=async()=>{throw failure;};
+  await assert.rejects(client.user.isPremium(),error=>error===failure && error.retryAfter==='58');
+});
+test('both download entry points forward asynchronous failures into their readable stream',async()=>{
+  for(const download of [(client)=>client.download('https://open.spotify.com/track/'+id,{}),
+    (client)=>require('spdl').spdl('https://open.spotify.com/track/'+id,{client})]){
+    const client=new Spotify({accessToken:'fixture-token'});
+    const failure=new SpotifyApiError(429,'Spotify metadata request failed','58');
+    client.user.isPremium=async()=>{throw failure;};
+    const stream=download(client);
+    await assert.rejects(require('node:stream/promises').pipeline(stream,new(require('node:stream').Writable)({write(chunk,encoding,callback){callback();}})),error=>error===failure);
+    assert.equal(stream.destroyed,true);
+  }
+});
 test('legacy package entry loads in CommonJS and ESM',async()=>{
   assert.equal(typeof require('spdl').Spotify,'function');
   assert.equal(typeof (await import('spdl')).Spotify,'function');

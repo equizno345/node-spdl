@@ -75,7 +75,7 @@ export class PlaylistClient {
     }
 
     /** Shared discovery for the existing web-player metadata methods. */
-    public async queryHash(force = false, operation: "fetchPlaylist" | "getTrack" = "fetchPlaylist"): Promise<string> {
+    public async queryHash(force = false, operation: "fetchPlaylist" | "getTrack" | "accountAttributes" | "profileAttributes" = "fetchPlaylist"): Promise<string> {
         const cached = PlaylistClient.hashes.get(operation);
         if (!force && cached && cached.expiresAt > Date.now()) return cached.value;
         const pending = PlaylistClient.pendingHashes.get(operation);

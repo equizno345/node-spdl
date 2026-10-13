@@ -39,7 +39,8 @@ export const spdl = (
             throw new SpotifyError("An unplayable Spotify entity was provided.");
         }
 
-        downloadContentFromInfo(stream, content, client, options);
+        downloadContentFromInfo(stream, content, client, options).catch(error =>
+            stream.destroy(error instanceof Error ? error : new SpotifyError("Spotify download failed")));
     } else {
         stream.destroy();
         throw new SpotifyAuthError("An invalid Spotify URL was provided.");
