@@ -324,6 +324,19 @@ test('AAC metadata reads only matching playback descriptors and leaves native me
   descriptors=undefined;await assert.rejects(client.tracks.getMetadata(gid,'MP4_128'),/AAC metadata/);
 });
 
+test('AAC accepts one explicitly relinked audio track and rejects unrelated or ambiguous entries',async()=>{
+  const client=new Spotify({accessToken:'access'}),gid='0'.repeat(31)+'1',uri='spotify:track:'+'0'.repeat(21)+'1';
+  const alternate='spotify:track:'+'0'.repeat(21)+'2';
+  const item={track_type:'AUDIO',metadata:{uri:alternate,linked_from_uri:uri},manifest:{file_ids_mp4:[{file_id:'b'.repeat(40),format:10}]}};
+  let media={[alternate]:{item}};
+  client.request=async endpoint=>endpoint.includes('/metadata/4/')?{gid,name:'Track'}:{media};
+  assert.equal((await client.tracks.getMetadata(gid,'MP4_128')).files[0].fileId,'b'.repeat(40));
+  item.metadata.linked_from_uri=null;await assert.rejects(client.tracks.getMetadata(gid,'MP4_128'),/AAC metadata/);
+  item.metadata.linked_from_uri=uri;item.track_type='VIDEO';await assert.rejects(client.tracks.getMetadata(gid,'MP4_128'),/AAC metadata/);
+  item.track_type='AUDIO';const other='spotify:track:'+'0'.repeat(21)+'3';media[other]={item:{...item,metadata:{...item.metadata,uri:other}}};
+  await assert.rejects(client.tracks.getMetadata(gid,'MP4_128'),/AAC metadata/);
+});
+
 function mp4Fixture(){
   const box=(name,...parts)=>{const payload=Buffer.concat(parts),header=Buffer.alloc(8);header.writeUInt32BE(payload.length+8);header.write(name,4);return Buffer.concat([header,payload]);};
   const description=Buffer.alloc(8);description.writeUInt32BE(1,4);

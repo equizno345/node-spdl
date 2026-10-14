@@ -47,7 +47,13 @@ export class TrackClient {
         if (format?.startsWith("MP4")) {
             const uri = `spotify:track:${base62.encode(Buffer.from(gid, "hex")).padStart(22, "0")}`;
             const playback = await this.client.request(`${Endpoints.TRACK_PLAYBACK}${uri}?manifestFileFormat=file_ids_mp4`);
-            const files: unknown = playback?.media?.[uri]?.item?.manifest?.file_ids_mp4;
+            // Spotify may relink a regional recording. Only accept an explicit
+            // link back to the requested track; other entries can be videos.
+            const linked = Object.entries(playback?.media || {}).filter(([key, value]: [string, any]) =>
+                value?.item?.metadata?.linked_from_uri === uri &&
+                value.item.metadata.uri === key && value.item.track_type === "AUDIO");
+            const item = playback?.media?.[uri]?.item || (linked.length === 1 ? (linked[0][1] as any).item : undefined);
+            const files: unknown = item?.manifest?.file_ids_mp4;
             if (!Array.isArray(files)) throw new SpotifyError("Invalid Spotify AAC metadata");
             const formats: Record<string, string> = {"10": "MP4_128", "11": "MP4_256"};
             for (const file of files) {
