@@ -1,7 +1,7 @@
 import { Spotify } from "./client.js";
 import { Endpoints } from "./const.js";
 import { parseLyrics, parseTrack, parseTrackMetadata } from "./parser.js";
-import { ColorLyrics, Track, TrackMetadata } from "./types.js";
+import { ColorLyrics, SpdlFormat, Track, TrackMetadata } from "./types.js";
 import { getIdFromQuery } from "./url.js";
 import { SpotifyApiError, SpotifyError } from "./errors.js";
 import { base62 } from "./util.js";
@@ -39,10 +39,27 @@ export class TrackClient {
         return parseTrack(track);
     } 
 
-    public async getMetadata(gid: string): Promise<TrackMetadata> {
+    public async getMetadata(gid: string, format?: SpdlFormat): Promise<TrackMetadata> {
         if (!/^[a-f0-9]{32}$/i.test(gid)) throw new SpotifyError("Invalid Spotify track identifier");
         const meta = await this.client.request(`${Endpoints.TRACK_METADATA}${gid}`);
         const track = parseTrackMetadata(meta);
+        // Web-player AAC descriptors are absent from native AUDIO_FILES metadata.
+        if (format?.startsWith("MP4")) {
+            const uri = `spotify:track:${base62.encode(Buffer.from(gid, "hex")).padStart(22, "0")}`;
+            const playback = await this.client.request(`${Endpoints.TRACK_PLAYBACK}${uri}?manifestFileFormat=file_ids_mp4`);
+            const files: unknown = playback?.media?.[uri]?.item?.manifest?.file_ids_mp4;
+            if (!Array.isArray(files)) throw new SpotifyError("Invalid Spotify AAC metadata");
+            const formats: Record<string, string> = {"10": "MP4_128", "11": "MP4_256"};
+            for (const file of files) {
+                if (!Object.hasOwn(formats, String(file?.format))) continue;
+                const mapped = formats[String(file?.format)];
+                if (typeof file.file_id !== "string" || !/^[a-f0-9]{40}$/i.test(file.file_id))
+                    throw new SpotifyError("Invalid Spotify AAC file descriptor");
+                if (!track.files.some(existing => existing.fileId === file.file_id && existing.format === mapped))
+                    track.files.push({fileId: file.file_id, format: mapped});
+            }
+            return track;
+        }
         if (track.files.length || !Array.isArray(meta.audio_formats)) return track;
 
         // New v4 metadata contains original-audio descriptors, not playable file IDs.

@@ -155,9 +155,14 @@ test('original cookie login accepts the current seed feed and does not leak cook
     agent.get('https://git.gay').intercept({path:'/thereallo/totp-secrets/raw/branch/main/secrets/secrets.json',method:'GET',headers:headers=>!headers.cookie}).reply(200,[{version:59,secret:'older'},{version:61,secret:'current'}]);
     const spotify=agent.get('https://open.spotify.com');
     spotify.intercept({path:'/api/server-time/',method:'GET',headers:headers=>!headers.cookie}).reply(200,{serverTime:Math.floor(Date.now()/1000)});
-    spotify.intercept({path:path=>path.startsWith('/api/token/')&&path.includes('totpVer=61'),method:'GET',headers:{cookie:'sp_dc=fixture-cookie'}}).reply(200,{isAnonymous:false,accessToken:'fixture-token',accessTokenExpirationTimestampMs:Date.now()+3600000});
+    spotify.intercept({path:path=>path.startsWith('/api/token/')&&path.includes('totpVer=61'),method:'GET',headers:{cookie:'sp_dc=fixture-cookie'}}).reply(200,{isAnonymous:false,accessToken:'fixture-token',clientId:'fixture-client',accessTokenExpirationTimestampMs:Date.now()+3600000});
+    spotify.intercept({path:'/',method:'GET',headers:headers=>!headers.cookie&&!headers.authorization}).reply(200,'<script id="appServerConfig" type="text/plain">'+Buffer.from(JSON.stringify({clientVersion:'1.2.3.test'})).toString('base64')+'</script>');
+    agent.get('https://clienttoken.spotify.com').intercept({path:'/v1/clienttoken',method:'POST',body:body=>JSON.parse(body).client_data.client_id==='fixture-client'}).reply(200,{granted_token:{token:'fixture-client-token',refresh_after_seconds:3600}});
     const client=await Spotify.create({cookie:'sp_dc=fixture-cookie'});
     assert.equal(client.accessToken,'fixture-token');
+    assert.equal(client.getHeaders()['Client-Token'],'fixture-client-token');
+    assert.equal(client.getRawHeaders()['Client-Token'],'fixture-client-token');
+    await Promise.all(Array.from({length:8},()=>client.refresh()));
     agent.assertNoPendingInterceptors();
   } finally {undici.setGlobalDispatcher(previous);await agent.close();}
 });
@@ -233,4 +238,230 @@ test('package entry loads outside the repository working directory',()=>{
   const esm=require('node:url').pathToFileURL(require('node:path').join(require('node:path').dirname(entry),'index.js')).href;
   execFileSync(process.execPath,['-e', "import("+JSON.stringify(esm)+").then(m=>require(\"node:assert/strict\").equal(typeof m.Spotify,\"function\"));"],{cwd:require('node:os').tmpdir(),stdio:'pipe'});
   execFileSync(process.execPath,['-e',`const assert=require('node:assert/strict'); assert.equal(typeof require(${JSON.stringify(entry)}).Spotify,'function');`],{cwd:require('node:os').tmpdir(),stdio:'pipe'});
+});
+
+test('client tokens refresh once concurrently, honor expiry, and retain the authenticated client ID',async()=>{
+  const agent=new undici.MockAgent();agent.disableNetConnect();
+  const previous=undici.getGlobalDispatcher();undici.setGlobalDispatcher(agent);
+  try{
+    const client=new Spotify({accessToken:'access'});client.clientId='authenticated-client';
+    const config='<script type="application/json" id="appServerConfig">'+JSON.stringify({clientVersion:'1.3.6.test',clientId:'unrelated-page-client'})+'</script>';
+    const page=()=>agent.get('https://open.spotify.com').intercept({path:'/',headers:headers=>!headers.authorization&&!headers.cookie}).reply(200,config);
+    const grant=(token,refresh=60,expiry=120)=>agent.get('https://clienttoken.spotify.com').intercept({path:'/v1/clienttoken',method:'POST',body:body=>{
+      assert.deepEqual(JSON.parse(body),{client_data:{client_id:'authenticated-client',client_version:'1.3.6.test',js_sdk_data:{}}});return true;
+    }}).reply(200,{granted_token:{token,refresh_after_seconds:refresh,expires_after_seconds:expiry}});
+    page();grant('first');
+    const started=Date.now();await Promise.all(Array.from({length:12},()=>client.refreshClient()));
+    assert.equal(client.clientToken,'first');assert.equal(client.clientId,'authenticated-client');
+    assert.ok(client.clientExpiration>=started+60000&&client.clientExpiration<=Date.now()+60000);
+    await client.refresh();await client.refreshClient();
+    client.clientExpiration=0;page();grant('second',120,30);
+    await Promise.all([client.refresh(),client.refreshClient()]);
+    assert.equal(client.clientToken,'second');assert.ok(client.clientExpiration<=Date.now()+30000);
+    agent.assertNoPendingInterceptors();
+  }finally{undici.setGlobalDispatcher(previous);await agent.close();}
+});
+
+test('expired cookie access refresh is coalesced and preserves an unexpired matching client token',async()=>{
+  const agent=new undici.MockAgent();agent.disableNetConnect();
+  const previous=undici.getGlobalDispatcher();undici.setGlobalDispatcher(agent);
+  try{
+    const client=new Spotify({cookie:'sp_dc=offline',clientToken:'existing-client-token'});
+    client.accessToken='expired';client.clientId='same-client';
+    agent.get('https://git.gay').intercept({path:'/thereallo/totp-secrets/raw/branch/main/secrets/secrets.json'}).reply(200,[{version:61,secret:'offline'}]);
+    agent.get('https://open.spotify.com').intercept({path:'/api/server-time/'}).reply(200,{serverTime:Math.floor(Date.now()/1000)});
+    agent.get('https://open.spotify.com').intercept({path:path=>path.startsWith('/api/token/'),headers:{cookie:'sp_dc=offline'}}).reply(200,{isAnonymous:false,accessToken:'renewed',clientId:'same-client',accessTokenExpirationTimestampMs:Date.now()+3600000});
+    await Promise.all(Array.from({length:12},()=>client.refresh()));
+    assert.equal(client.accessToken,'renewed');assert.equal(client.clientToken,'existing-client-token');
+    await client.refresh();agent.assertNoPendingInterceptors();
+  }finally{undici.setGlobalDispatcher(previous);await agent.close();}
+});
+
+test('client token failures preserve status, do not poison the cache, and never retry automatically',async()=>{
+  const agent=new undici.MockAgent();agent.disableNetConnect();
+  const previous=undici.getGlobalDispatcher();undici.setGlobalDispatcher(agent);
+  try{
+    const client=new Spotify({accessToken:'access'});client.clientId='client';
+    for(const response of [null,{granted_token:{token:'invalid',refresh_after_seconds:0}}, {granted_token:{token:'good',refresh_after_seconds:60}}]){
+      agent.get('https://open.spotify.com').intercept({path:'/'}).reply(200,'<script id="appServerConfig">{"clientVersion":"1.2.test"}</script>');
+      const request=agent.get('https://clienttoken.spotify.com').intercept({path:'/v1/clienttoken',method:'POST'});
+      if(response===null){request.reply(429,'private provider response',{headers:{'retry-after':'58'}});await assert.rejects(client.refreshClient(),error=>error.statusCode===429&&error.retryAfter==='58'&&!error.message.includes('private'));}
+      else if(response.granted_token.token==='invalid'){request.reply(200,response);await assert.rejects(client.refreshClient(),/valid client token/);}
+      else{request.reply(200,response);await client.refreshClient();assert.equal(client.clientToken,'good');}
+    }
+    agent.assertNoPendingInterceptors();
+  }finally{undici.setGlobalDispatcher(previous);await agent.close();}
+});
+
+test('AAC licensing sends both tokens, preserves HTTP failures, and rejects missing credentials and empty licenses',async()=>{
+  const agent=new undici.MockAgent();agent.disableNetConnect();
+  const previous=undici.getGlobalDispatcher();undici.setGlobalDispatcher(agent);
+  try{
+    const client=new Spotify({accessToken:'account-token',clientToken:'account-client-token'});
+    const pool=agent.get('https://gue1-spclient.spotify.com');
+    for(const status of [403,429,200]){
+      pool.intercept({path:'/widevine-license/v1/audio/license',method:'POST',headers:{authorization:'Bearer account-token','client-token':'account-client-token'}}).reply(status,Buffer.alloc(0),{headers:{'retry-after':'60'}});
+      await assert.rejects(client.widevine.getWidevineLicense('audio',Buffer.from('challenge')),error=>status===200?/empty license/.test(error.message):error instanceof SpotifyApiError&&error.statusCode===status&&error.retryAfter==='60');
+    }
+    pool.intercept({path:'/widevine-license/v1/audio/license',method:'POST'}).reply(200,Buffer.from('license'));
+    assert.equal((await client.widevine.getWidevineLicense('audio',Buffer.from('challenge'))).toString(),'license');
+    const second=new Spotify({accessToken:'other-account'});
+    await assert.rejects(second.widevine.getWidevineLicense('audio',Buffer.from('challenge')),/client token/);
+    assert.equal(second.getHeaders()['Client-Token'],undefined);
+    agent.assertNoPendingInterceptors();
+  }finally{undici.setGlobalDispatcher(previous);await agent.close();}
+});
+
+test('AAC metadata reads only matching playback descriptors and leaves native metadata unchanged',async()=>{
+  const client=new Spotify({accessToken:'access'}),gid='0'.repeat(31)+'1',uri='spotify:track:'+'0'.repeat(21)+'1';
+  const original={gid,name:'Track',file:[{file_id:'a'.repeat(40),format:'OGG_VORBIS_160'}]};
+  let descriptors=[{file_id:'b'.repeat(40),format:'10',bitrate:128000},{file_id:'c'.repeat(40),format:11,bitrate:256000},{file_id:'d'.repeat(40),format:99}];
+  let calls=0;
+  client.request=async endpoint=>{calls++;if(endpoint.includes('/metadata/4/'))return original;assert.equal(endpoint,require('spdl').Endpoints.TRACK_PLAYBACK+uri+'?manifestFileFormat=file_ids_mp4');return {media:{[uri]:{item:{manifest:{file_ids_mp4:descriptors}}}}};};
+  const native=await client.tracks.getMetadata(gid);assert.equal(calls,1);assert.equal(native.files.length,1);
+  const aac=await client.tracks.getMetadata(gid,'MP4_128');assert.deepEqual(aac.files.map(file=>file.format),['OGG_VORBIS_160','MP4_128','MP4_256']);
+  descriptors=[{file_id:'bad',format:10}];await assert.rejects(client.tracks.getMetadata(gid,'MP4_128'),/descriptor/);
+  descriptors=undefined;await assert.rejects(client.tracks.getMetadata(gid,'MP4_128'),/AAC metadata/);
+});
+
+function mp4Fixture(){
+  const box=(name,...parts)=>{const payload=Buffer.concat(parts),header=Buffer.alloc(8);header.writeUInt32BE(payload.length+8);header.write(name,4);return Buffer.concat([header,payload]);};
+  const description=Buffer.alloc(8);description.writeUInt32BE(1,4);
+  const init=box('moov',box('trak',box('mdia',box('minf',box('stbl',box('stsd',description,box('enca',Buffer.alloc(28),box('sinf',box('frma',Buffer.from('mp4a'))))))))));
+  const key=Buffer.from('00112233445566778899aabbccddeeff','hex'),iv=Buffer.from('1020304050607080','hex');
+  const plain=Buffer.from('encrypted-sample-now-readable');
+  const cipher=require('node:crypto').createCipheriv('aes-128-ctr',key,Buffer.concat([iv,Buffer.alloc(8)]));
+  const ciphertext=Buffer.concat([cipher.update(plain),cipher.final()]);
+  const fragment=(sample,encrypted)=>{
+    const tfhd=Buffer.alloc(8);tfhd.writeUInt32BE(1,4);
+    const trun=Buffer.alloc(16);trun.writeUInt32BE(0x201);trun.writeUInt32BE(1,4);trun.writeUInt32BE(sample.length,12);
+    const senc=Buffer.alloc(16);senc.writeUInt32BE(1,4);iv.copy(senc,8);
+    const make=()=>box('moof',box('traf',box('tfhd',tfhd),box('trun',trun),...(encrypted?[box('senc',senc)]:[])));
+    trun.writeUInt32BE(make().length+8,8);
+    return Buffer.concat([make(),box('mdat',sample)]);
+  };
+  const clearSample=Buffer.from('clear-opening-sample');
+  return {key:key.toString('hex'),plain,ciphertext,clearSample,parts:[init,fragment(clearSample,false),fragment(ciphertext,true)]};
+}
+
+async function mockMp4(agent,variant='success'){
+  const fixture=mp4Fixture(),fileId='b'.repeat(40);
+  const client=new Spotify({accessToken:'access',clientToken:'client'});
+  client.user.isPremium=async()=>false;
+  client.widevine.getKey=async()=>fixture.key;
+  agent.get('https://spclient.wg.spotify.com').intercept({path:path=>path.startsWith('/metadata/4/track/')}).reply(200,{gid:'0'.repeat(32),name:'Fixture'});
+  agent.get('https://gue1-spclient.spotify.com').intercept({path:path=>path.startsWith('/track-playback/')}).reply(200,{media:{['spotify:track:'+id]:{item:{manifest:{file_ids_mp4:[{file_id:fileId,format:'10'}]}}}}});
+  agent.get('https://gue1-spclient.spotify.com').intercept({path:path=>path.startsWith('/storage-resolve/v2/files/audio/interactive/10/'+fileId)}).reply(200,{result:'CDN',cdnurl:['https://audio.example.test/track']});
+  agent.get('https://seektables.scdn.co').intercept({path:'/seektable/'+fileId+'.json'}).reply(200,{offset:fixture.parts[0].length,segments:fixture.parts.slice(1).map(part=>[part.length]),pssh:Buffer.from('offline').toString('base64')});
+  let start=0,requests=0;
+  const total=fixture.parts.reduce((sum,part)=>sum+part.length,0);
+  fixture.parts.forEach((part,index)=>{
+    const end=start+part.length-1,range='bytes='+start+'-'+end;
+    const options={headers:{'content-range':'bytes '+start+'-'+end+'/'+total}};
+    agent.get('https://audio.example.test').intercept({path:'/track',headers:{range}}).reply(()=>{
+      requests++;
+      if(index===0&&variant==='status')return {statusCode:503,data:'provider detail',responseOptions:{headers:{'retry-after':'30'}}};
+      if(index===0&&variant==='truncated')return {statusCode:206,data:part.subarray(0,-1),responseOptions:options};
+      if(index===0&&variant==='range')return {statusCode:206,data:part,responseOptions:{headers:{'content-range':'bytes 1-2/3'}}};
+      return {statusCode:206,data:part,responseOptions:options};
+    });
+    start=end+1;
+  });
+  return {client,fixture,requests:()=>requests};
+}
+
+test('public MP4 download decrypts encrypted fragments, preserves clear lead, streams early, and ends',async()=>{
+  const agent=new undici.MockAgent();agent.disableNetConnect();
+  const previous=undici.getGlobalDispatcher();undici.setGlobalDispatcher(agent);
+  try{
+    const {client,fixture,requests}=await mockMp4(agent);
+    const chunks=[];
+    await require('node:stream/promises').pipeline(client.download('https://open.spotify.com/track/'+id,{format:'MP4_128',highWaterMark:1}),new(require('node:stream').Writable)({highWaterMark:1,write(chunk,encoding,callback){if(!chunks.length)assert.ok(requests()<3,'must deliver before fetching the entire track');chunks.push(chunk);setTimeout(callback,5);}}),{signal:AbortSignal.timeout(2000)});
+    const output=Buffer.concat(chunks);
+    assert.ok(output.includes(fixture.clearSample));assert.ok(output.includes(fixture.plain));assert.ok(!output.includes(fixture.ciphertext));
+    assert.equal(output.length,fixture.parts.reduce((sum,part)=>sum+part.length,0));
+    assert.equal(requests(),3);agent.assertNoPendingInterceptors();
+  }finally{undici.setGlobalDispatcher(previous);await agent.close();}
+});
+
+test('MP4 rejects failed, truncated and mismatched CDN ranges through its public readable',async()=>{
+  for(const variant of ['status','truncated','range']){
+    const agent=new undici.MockAgent();agent.disableNetConnect();
+    const previous=undici.getGlobalDispatcher();undici.setGlobalDispatcher(agent);
+    try{
+      const {client,requests}=await mockMp4(agent,variant);
+      const stream=client.download('https://open.spotify.com/track/'+id,{format:'MP4_128'});
+      await assert.rejects(require('node:stream/promises').pipeline(stream,new(require('node:stream').Writable)({write(chunk,encoding,callback){callback();}}),{signal:AbortSignal.timeout(2000)}),error=>variant==='status'?error.statusCode===503&&error.retryAfter==='30':error.message.includes(variant==='truncated'?'incomplete':'unexpected'));
+      assert.equal(requests(),1);assert.equal(stream.destroyed,true);
+    }finally{undici.setGlobalDispatcher(previous);await agent.close();}
+  }
+});
+
+test('MP4 stops fetching when the consumer fails and rejects invalid seek tables',async()=>{
+  const agent=new undici.MockAgent();agent.disableNetConnect();
+  const previous=undici.getGlobalDispatcher();undici.setGlobalDispatcher(agent);
+  try{
+    const {client,requests}=await mockMp4(agent);
+    const stopped=new Error('consumer stopped');
+    await assert.rejects(require('node:stream/promises').pipeline(client.download('https://open.spotify.com/track/'+id,{format:'MP4_128',highWaterMark:1}),new(require('node:stream').Writable)({write(chunk,encoding,callback){callback(stopped);}}),{signal:AbortSignal.timeout(2000)}),error=>error===stopped);
+    await new Promise(resolve=>setTimeout(resolve,20));assert.ok(requests()<3);
+    agent.get('https://seektables.scdn.co').intercept({path:'/seektable/invalid.json'}).reply(200,{offset:1,segments:[[-1]],pssh:'fixture'});
+    await assert.rejects(client.widevine.getSeektable('invalid'),/Invalid Spotify seek table/);
+  }finally{undici.setGlobalDispatcher(previous);await agent.close();}
+});
+test('a changed authenticated client ID invalidates its old client token before licensing',async()=>{
+  const agent=new undici.MockAgent();agent.disableNetConnect();
+  const previous=undici.getGlobalDispatcher();undici.setGlobalDispatcher(agent);
+  try{
+    const client=new Spotify({cookie:'sp_dc=offline',clientToken:'old-client-token'});
+    client.accessToken='expired';client.clientId='old-client';
+    agent.get('https://git.gay').intercept({path:'/thereallo/totp-secrets/raw/branch/main/secrets/secrets.json'}).reply(200,[{version:61,secret:'offline'}]);
+    const spotify=agent.get('https://open.spotify.com');
+    spotify.intercept({path:'/api/server-time/'}).reply(200,{serverTime:Math.floor(Date.now()/1000)});
+    spotify.intercept({path:path=>path.startsWith('/api/token/')}).reply(200,{isAnonymous:false,accessToken:'renewed',clientId:'new-client',accessTokenExpirationTimestampMs:Date.now()+3600000});
+    spotify.intercept({path:'/'}).reply(200,'<script id="appServerConfig">{"clientVersion":"1.3.test"}</script>');
+    agent.get('https://clienttoken.spotify.com').intercept({path:'/v1/clienttoken',method:'POST',body:body=>JSON.parse(body).client_data.client_id==='new-client'}).reply(200,{granted_token:{token:'new-client-token',refresh_after_seconds:3600}});
+    agent.get('https://gue1-spclient.spotify.com').intercept({path:'/widevine-license/v1/audio/license',method:'POST',headers:{authorization:'Bearer renewed','client-token':'new-client-token'}}).reply(200,Buffer.from('license'));
+    assert.equal((await client.widevine.getWidevineLicense('audio',Buffer.from('challenge'))).toString(),'license');
+    assert.equal(client.clientId,'new-client');assert.equal(client.clientToken,'new-client-token');
+    agent.assertNoPendingInterceptors();
+  }finally{undici.setGlobalDispatcher(previous);await agent.close();}
+});
+
+test('client version discovery rejects unavailable configuration without issuing a token request',async()=>{
+  const agent=new undici.MockAgent();agent.disableNetConnect();
+  const previous=undici.getGlobalDispatcher();undici.setGlobalDispatcher(agent);
+  try{
+    const client=new Spotify({accessToken:'account'});client.clientId='account-client';
+    for(const body of ['<html>changed player</html>','<script id="appServerConfig">not-json</script>','<script id="appServerConfig">{"clientVersion":null}</script>']){
+      agent.get('https://open.spotify.com').intercept({path:'/'}).reply(200,body);
+      await assert.rejects(client.refreshClient(),/client version/);
+      assert.equal(client.clientToken,'');
+    }
+    agent.get('https://open.spotify.com').intercept({path:'/'}).reply(429,'private',{headers:{'retry-after':'10'}});
+    await assert.rejects(client.refreshClient(),error=>error.statusCode===429&&error.retryAfter==='10');
+    agent.assertNoPendingInterceptors();
+  }finally{undici.setGlobalDispatcher(previous);await agent.close();}
+});
+
+test('AAC licensing refreshes an expired client token without renewing valid access credentials',async()=>{
+  const agent=new undici.MockAgent();agent.disableNetConnect();
+  const previous=undici.getGlobalDispatcher();undici.setGlobalDispatcher(agent);
+  try{
+    const client=new Spotify({cookie:'sp_dc=offline',accessToken:'still-valid',clientToken:'expired-client'});
+    client.clientId='account';client.accessExpiration=Date.now()+3600000;client.clientExpiration=0;
+    agent.get('https://open.spotify.com').intercept({path:'/'}).reply(200,'<script id="appServerConfig">{"clientVersion":"1.3.test"}</script>');
+    agent.get('https://clienttoken.spotify.com').intercept({path:'/v1/clienttoken',method:'POST'}).reply(200,{granted_token:{token:'renewed-client',refresh_after_seconds:3600}});
+    agent.get('https://gue1-spclient.spotify.com').intercept({path:'/widevine-license/v1/audio/license',method:'POST',headers:{authorization:'Bearer still-valid','client-token':'renewed-client'}}).reply(200,Buffer.from('license'));
+    await client.widevine.getWidevineLicense('audio',Buffer.from('challenge'));
+    agent.assertNoPendingInterceptors();
+  }finally{undici.setGlobalDispatcher(previous);await agent.close();}
+});
+test('client expiry is rechecked after access refresh completes',async()=>{
+  const client=new Spotify({cookie:'sp_dc=offline'});
+  client.accessToken='expired';client.clientId='account';client.clientToken='expires-during-refresh';
+  client.clientExpiration=Date.now()+10;
+  client.refreshToken=async()=>{await new Promise(resolve=>setTimeout(resolve,20));client.accessExpiration=Date.now()+3600000;};
+  let clientRefreshes=0;client.refreshClient=async()=>{clientRefreshes++;client.clientExpiration=Date.now()+3600000;};
+  await client.refresh();assert.equal(clientRefreshes,1);
 });

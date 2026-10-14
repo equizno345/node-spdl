@@ -4,7 +4,7 @@ import undici from "undici";
 import { Spotify } from "./client";
 import { Endpoints } from "./const";
 import { WidevineDevice } from "./types";
-import { SpotifyError, SpotifyResolveError, SpotifyStreamError } from "./errors";
+import { SpotifyApiError, SpotifyAuthError, SpotifyError, SpotifyResolveError, SpotifyStreamError } from "./errors";
 
 export class WidevineClient {
 	readonly client: Spotify;
@@ -41,7 +41,7 @@ export class WidevineClient {
 		const request = await this.getWidevineLicense("audio", challenge);
 		const license = session.parseLicense(request);
 
-		if (!license[0]) {
+		if (!license[0] || !/^[a-f0-9]{32}$/i.test(license[0].key)) {
 			throw new SpotifyStreamError("Widevine license request returned an invalid key");
 		}
 
@@ -85,24 +85,50 @@ export class WidevineClient {
 	}
 
 	public async getSeektable(fileId: string): Promise<Record<string, any>> {
-		const request = await undici.request(`${Endpoints.SEEKTABLE}${fileId}.json`);
-
-		const response: any = await request.body.json();
+		const request = await undici.request(`${Endpoints.SEEKTABLE}${fileId}.json`, {headersTimeout: 15000, bodyTimeout: 15000});
+		if (request.statusCode !== 200) {
+			await request.body.dump();
+			throw new SpotifyApiError(request.statusCode, "Spotify seek table request failed",
+				typeof request.headers["retry-after"] === "string" ? request.headers["retry-after"] : undefined);
+		}
+		const response = await request.body.json() as {offset: number; segments: number[][]; pssh_widevine?: string; pssh?: string};
+		if (!Number.isSafeInteger(response?.offset) || response.offset <= 0 || !Array.isArray(response.segments) ||
+			!response.segments.length || response.segments.some(segment => !Array.isArray(segment) || !Number.isSafeInteger(segment[0]) || segment[0] <= 0) ||
+			typeof (response.pssh_widevine || response.pssh) !== "string" || !(response.pssh_widevine || response.pssh))
+			throw new SpotifyStreamError("Invalid Spotify seek table.");
 		return response;
 	}
 
 	protected async getWidevineLicense(mediaType: string, challenge: Buffer) {
+		await this.client.refresh();
+		if (!this.client.clientToken) throw new SpotifyAuthError("AAC licensing requires a cookie session or a caller-supplied client token.");
 		const request = await undici.request(
 			`${Endpoints.WIDEVINE}${mediaType}/license`,
 			{
 				body: challenge,
-				headers: this.client.getRawHeaders(),
-				method: "POST"
+				headers: this.client.getHeaders(),
+				method: "POST",
+				headersTimeout: 15000,
+				bodyTimeout: 15000
 			}
 		);
-		const response = await request.body.bytes();
-
-		return Buffer.from(response);
+		if (request.statusCode !== 200) {
+			await request.body.dump();
+			throw new SpotifyApiError(request.statusCode, "Spotify Widevine license request failed",
+				typeof request.headers["retry-after"] === "string" ? request.headers["retry-after"] : undefined);
+		}
+		const chunks: Buffer[] = [];
+		let size = 0;
+		for await (const chunk of request.body) {
+			size += chunk.length;
+			if (size > 1024 * 1024) {
+				request.body.destroy();
+				throw new SpotifyStreamError("Spotify license response exceeded the size limit.");
+			}
+			chunks.push(Buffer.from(chunk));
+		}
+		if (!size) throw new SpotifyStreamError("Spotify returned an empty license.");
+		return Buffer.concat(chunks);
 	}
 }
 

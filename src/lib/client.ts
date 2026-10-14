@@ -1,4 +1,3 @@
-import os from "node:os";
 import { PassThrough, Readable } from "node:stream";
 import undici from "undici";
 import unplayplay from "@spdl/unplayplay";
@@ -32,6 +31,8 @@ export class Spotify {
     accessExpiration: number = 0;
     clientExpiration: number = 0;
     readonly options: SpdlClientOptions;
+    private accessRefresh?: Promise<void>;
+    private clientRefresh?: Promise<void>;
 
     public artists: ArtistClient;
     public playlists: PlaylistClient;
@@ -54,7 +55,10 @@ export class Spotify {
 
         if (options.clientToken) {
             this.clientToken = options.clientToken;
+            // Caller-supplied tokens have no known expiry and remain caller-managed.
+            this.clientExpiration = Infinity;
         }
+        if (options.cookie) this.cookie = options.cookie;
 
         if (!options.forcePremium) {
             options.forcePremium = false;
@@ -108,6 +112,7 @@ export class Spotify {
     getHeaders(): Record<string, string> {
         return {
             "Authorization": `Bearer ${this.accessToken}`,
+            ...(this.clientToken ? {"Client-Token": this.clientToken} : {}),
             "Accept": "application/json",
             "Accept-Language": "*",
             "Connection": "keep-alive",
@@ -122,6 +127,7 @@ export class Spotify {
     getRawHeaders(): Record<string, string> {
         return {
             "Authorization": `Bearer ${this.accessToken}`,
+            ...(this.clientToken ? {"Client-Token": this.clientToken} : {}),
             "Accept": "*",
             "Accept-Language": "*",
             "Connection": "keep-alive"
@@ -133,11 +139,11 @@ export class Spotify {
      */
     public async refresh(): Promise<void> {
         const now = Date.now();
-        if (now > this.accessExpiration) {
+        if (this.cookie && (!this.accessToken || now >= this.accessExpiration)) {
             await this.refreshToken();
         }
-        if (now > this.clientExpiration) {
-            //await this.refreshClient();
+        if (this.clientId && (!this.clientToken || Date.now() >= this.clientExpiration)) {
+            await this.refreshClient();
         }
     }
 
@@ -147,79 +153,109 @@ export class Spotify {
     public async refreshToken(): Promise<void> {
         const now = Date.now();
         if (now < this.accessExpiration && this.accessToken) return;
+        if (this.accessRefresh) return this.accessRefresh;
+        this.accessRefresh = (async () => {
 
-        const { otp, version } = await getSpotifyTotp();
-        const headers = {
-            "Referer": "https://open.spotify.com",
-            "User-Agent": this.getHeaders()["User-Agent"]
-        };
-        if (this.cookie.length) {
-            Object.assign(headers, { "Cookie": this.cookie });
-        }
-
-        const tokenRequest = await undici.request(
-            Endpoints.TOKEN,
-            {
-                headers,
-                method: "GET",
-                headersTimeout: 15000,
-                bodyTimeout: 15000,
-                query: {
-                    reason: "transport",
-                    productType: "web-player",
-                    totp: otp,
-                    totpServer: otp,
-                    totpVer: version.toString(),
-                }
+            const { otp, version } = await getSpotifyTotp();
+            const headers = {
+                "Referer": "https://open.spotify.com",
+                "User-Agent": this.getHeaders()["User-Agent"]
+            };
+            if (this.cookie.length) {
+                Object.assign(headers, { "Cookie": this.cookie });
             }
-        );
 
-        if (tokenRequest.statusCode !== 200) {
-            await tokenRequest.body.dump();
-            throw new SpotifyApiError(tokenRequest.statusCode, "Spotify login request failed");
-        }
-        const response: any = await tokenRequest.body.json();
-        const isAnonymous = response["isAnonymous"];
+            const tokenRequest = await undici.request(
+                Endpoints.TOKEN,
+                {
+                    headers,
+                    method: "GET",
+                    headersTimeout: 15000,
+                    bodyTimeout: 15000,
+                    query: {
+                        reason: "transport",
+                        productType: "web-player",
+                        totp: otp,
+                        totpServer: otp,
+                        totpVer: version.toString(),
+                    }
+                }
+            );
 
-        if (isAnonymous) {
-            throw new SpotifyAuthError("You must provide a valid sp_dc cookie from a Spotify logged in browser.\nRefer to https://github.com/PwLDev/node-spdl#readme to see how to extract a cookie.");
-        }
-        if (typeof response.accessToken !== "string" || !response.accessToken || !Number.isFinite(response.accessTokenExpirationTimestampMs))
-            throw new SpotifyError("Spotify login is temporarily unavailable");
+            if (tokenRequest.statusCode !== 200) {
+                await tokenRequest.body.dump();
+                throw new SpotifyApiError(tokenRequest.statusCode, "Spotify login request failed",
+                    typeof tokenRequest.headers["retry-after"] === "string" ? tokenRequest.headers["retry-after"] : undefined);
+            }
+            const response: any = await tokenRequest.body.json();
+            const isAnonymous = response["isAnonymous"];
 
-        this.accessToken = response["accessToken"];
-        this.clientId = response["clientId"];
+            if (isAnonymous) {
+                throw new SpotifyAuthError("You must provide a valid sp_dc cookie from a Spotify logged in browser.\nRefer to https://github.com/PwLDev/node-spdl#readme to see how to extract a cookie.");
+            }
+            if (typeof response.accessToken !== "string" || !response.accessToken ||
+                typeof response.clientId !== "string" || !response.clientId ||
+                !Number.isFinite(response.accessTokenExpirationTimestampMs) || response.accessTokenExpirationTimestampMs <= Date.now())
+                throw new SpotifyError("Spotify login is temporarily unavailable");
 
-        const expirationTime = response["accessTokenExpirationTimestampMs"];
-        if (expirationTime) {
-            this.accessExpiration = expirationTime;
-        }
+            if (this.clientId && this.clientId !== response.clientId) {
+                this.clientToken = "";
+                this.clientExpiration = 0;
+            }
+            this.accessToken = response["accessToken"];
+            this.clientId = response["clientId"];
+
+            const expirationTime = response["accessTokenExpirationTimestampMs"];
+            if (expirationTime) {
+                this.accessExpiration = expirationTime;
+            }
+        })();
+        try {await this.accessRefresh;}
+        finally {this.accessRefresh = undefined;}
     }
 
     public async refreshClient(): Promise<void> {
         const now = Date.now();
-        if (now < this.clientExpiration) return; // calling too many times auth might block the sender IP
+        if (now < this.clientExpiration && this.clientToken) return;
+        if (this.clientRefresh) return this.clientRefresh;
+        this.clientRefresh = (async () => {
 
-        const clientPayload = await this.getClientPayload();
-        const clientToken = await undici.request(
-            Endpoints.CLIENT_TOKEN,
-            {
-                method: "POST",
-                body: JSON.stringify(clientPayload),
-                headers: {
-                    "Accept": "application/json",
-                    "Content-Type": "application/json"
+            const clientPayload = await this.getClientPayload();
+            const clientToken = await undici.request(
+                Endpoints.CLIENT_TOKEN,
+                {
+                    method: "POST",
+                    body: JSON.stringify(clientPayload),
+                    headers: {
+                        "Accept": "application/json",
+                        "Content-Type": "application/json"
+                    },
+                    headersTimeout: 15000,
+                    bodyTimeout: 15000
                 }
+            );
+
+            if (clientToken.statusCode !== 200) {
+                await clientToken.body.dump();
+                throw new SpotifyApiError(clientToken.statusCode, "Spotify client token request failed",
+                    typeof clientToken.headers["retry-after"] === "string" ? clientToken.headers["retry-after"] : undefined);
             }
-        );
-
-        const clientResponse: any = await clientToken.body.json();
-
-        this.clientToken = clientResponse["granted_token"]["token"];
-        this.clientExpiration = now + (clientResponse["granted_token"]["refresh_after_seconds"] * 1000);
+            const response = await clientToken.body.json() as {
+                granted_token?: {token?: string; refresh_after_seconds?: number; expires_after_seconds?: number}
+            };
+            const granted = response.granted_token;
+            const ttl = Math.min(granted?.refresh_after_seconds ?? Infinity, granted?.expires_after_seconds ?? Infinity);
+            if (typeof granted?.token !== "string" || !granted.token || !Number.isFinite(ttl) || ttl <= 0)
+                throw new SpotifyAuthError("Spotify did not grant a valid client token.");
+            this.clientToken = granted.token;
+            this.clientExpiration = now + ttl * 1000;
+        })();
+        try {await this.clientRefresh;}
+        finally {this.clientRefresh = undefined;}
     }
 
     public async request(endpoint: string, body?: Record<string, unknown> | Uint8Array, options: {protobuf?: boolean} = {}): Promise<any> {
+        await this.refresh();
         if (!this.accessToken.length) {
             throw new SpotifyAuthError("This client is not authenticated yet.");
         }
@@ -254,53 +290,31 @@ export class Spotify {
     }
 
     private async getClientPayload() {
-        // https://github.com/brahmkshatriya/echo-spotify-extension/blob/main/ext/src/main/java/dev/brahmkshatriya/echo/extension/spotify/Authentication.kt
-        const playerJsRegex = new RegExp("https://open\\.spotifycdn\\.com/cdn/build/mobile-web-player/mobile-web-player\\..{8}\\.js");
-        const clientVersionRegex = new RegExp("clientID:\"(.{32})\",clientVersion:\"(.{10,24})\"");
-
-        const webPlayer = await undici.fetch(Endpoints.HOME_PAGE)
-            .then((r) => r.text());
-
-        const playerJsMatch = webPlayer.match(playerJsRegex);
-        if (!playerJsMatch || !playerJsMatch.length) {
-            throw new SpotifyAuthError("Failed to get the player JS.");
+        if (!this.clientId) throw new SpotifyAuthError("A cookie session or a caller-supplied client token is required.");
+        // Read public player configuration; never send account credentials to discovery.
+        const page = await undici.fetch(Endpoints.HOME_PAGE, {
+            headers: {"User-Agent": this.getHeaders()["User-Agent"]},
+            signal: AbortSignal.timeout(15000)
+        });
+        if (!page.ok) throw new SpotifyApiError(page.status, "Spotify player configuration request failed", page.headers.get("retry-after") || undefined);
+        const html = await page.text();
+        const config = Array.from(html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi))
+            .find(match => /\bid\s*=\s*["']appServerConfig["']/.test(match[1]))?.[2];
+        let clientVersion: unknown;
+        if (config) {
+            for (const source of [config, Buffer.from(config, "base64").toString("utf8")]) {
+                try {clientVersion = JSON.parse(source).clientVersion;}
+                catch {continue;}
+                if (typeof clientVersion === "string") break;
+            }
         }
-
-        const headers = {
-            "Referer": "https://open.spotify.com"
-        };
-        if (this.cookie.length) {
-            Object.assign(headers, { "Cookie": this.cookie });
-        }
-        // had to use fetch because gzip was giving trouble
-        const playerJs = await undici.fetch(playerJsMatch[0], {
-            method: "GET",
-            headers
-        })
-            .then((r) => r.text());
-
-        const clientVersionMatch = playerJs.match(clientVersionRegex);
-        if (!clientVersionMatch || !clientVersionMatch.length) {
+        if (typeof clientVersion !== "string" || !/^[a-zA-Z0-9.\-]{1,80}$/.test(clientVersion))
             throw new SpotifyAuthError("Failed to get the client version.");
-        }
-
-        const clientId = clientVersionMatch[1] || this.clientId;
-        const clientVersion = clientVersionMatch[2];
-
-        this.clientId = clientId;
-
         return {
             client_data: {
-                client_id: clientId,
+                client_id: this.clientId,
                 client_version: clientVersion,
-                js_sdk_data: {
-                    device_brand: "unknown",
-                    device_model: "unknown",
-                    os: os.platform(),
-                    os_version: os.version(),
-                    device_id: clientId,
-                    device_type: "computer"
-                }
+                js_sdk_data: {}
             },
         }
     }
@@ -356,7 +370,7 @@ export class Spotify {
         const isPremium = await this.user.isPremium();
 
         if (content instanceof TrackEntity) {
-            const metadata = await this.tracks.getMetadata(content.toHex());
+            const metadata = await this.tracks.getMetadata(content.toHex(), options.format);
             const formats = [
                 ...metadata.files.map((k) => k.format),
                 ...metadata.preview.map((k) => k.format)

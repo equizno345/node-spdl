@@ -25,7 +25,9 @@ export const Endpoints = {
     TRACKS_URL: "https://api.spotify.com/v1/tracks/",
     TRACK_STATS: "https://api.spotify.com/v1/audio-features/",
     TRACK_METADATA: "https://spclient.wg.spotify.com/metadata/4/track/",
-    WIDEVINE: "https://spclient.wg.spotify.com/widevine-license/v1/"
+    TRACK_PLAYBACK: "https://gue1-spclient.spotify.com/track-playback/v1/media/",
+    STORAGE_RESOLVE_MP4: "https://gue1-spclient.spotify.com/storage-resolve/v2/files/audio/interactive/",
+    WIDEVINE: "https://gue1-spclient.spotify.com/widevine-license/v1/"
 }
 
 export const Codecs = {
