@@ -60,6 +60,19 @@ export abstract class PlayableEntity extends SpotifyEntity {
     isPlayable(): boolean {
         return this.type !== "unknown";
     }
+
+    toHex(): string {
+        if (!/^[0-9A-Za-z]{22}$/.test(this.id)) {
+            throw new SpotifyResolveError("ID", "Invalid Spotify identifier");
+        }
+        // base-x preserves leading zero characters as extra bytes. Spotify IDs
+        // represent a fixed-width 128-bit integer, not a base-x byte sequence.
+        const hex = Buffer.from(base62.decode(this.id)).toString("hex").replace(/^0+/, "");
+        if (hex.length > 32) {
+            throw new SpotifyResolveError("ID", "Spotify identifier exceeds 128 bits");
+        }
+        return hex.padStart(32, "0");
+    }
 }
 
 export class EpisodeEntity extends PlayableEntity {
@@ -68,11 +81,6 @@ export class EpisodeEntity extends PlayableEntity {
         if (this.type !== "episode") {
             throw new SpotifyResolveError("URL", `Invalid track URL: ${url}`);
         }
-    }
-
-    toHex(): string {
-        const buffer = Buffer.from(base62.decode(this.id));
-        return buffer.toString("hex");
     }
 
     isPlayable(): boolean {
@@ -99,11 +107,6 @@ export class TrackEntity extends PlayableEntity {
         if (this.type !== "track") {
             throw new SpotifyResolveError("URL", `Invalid track URL: ${url}`);
         }
-    }
-
-    toHex(): string {
-        const buffer = Buffer.from(base62.decode(this.id));
-        return buffer.toString("hex");
     }
 
     isPlayable(): boolean {

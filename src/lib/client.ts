@@ -184,6 +184,19 @@ export class Spotify {
 
             if (tokenRequest.statusCode !== 200) {
                 await tokenRequest.body.dump();
+                // Spotify signals rejected cookies with a same-origin token
+                // redirect before returning 401. Recognize it without forwarding
+                // credentials to a redirect destination or exposing its query.
+                if ([301, 302, 303, 307, 308].includes(tokenRequest.statusCode) &&
+                    typeof tokenRequest.headers.location === "string") {
+                    let redirect: URL | undefined;
+                    try { redirect = new URL(tokenRequest.headers.location, Endpoints.TOKEN); } catch {}
+                    const tokenUrl = new URL(Endpoints.TOKEN);
+                    if (redirect?.origin === tokenUrl.origin && redirect.pathname === tokenUrl.pathname &&
+                        redirect.searchParams.has("_authfailed")) {
+                        throw new SpotifyAuthError("Spotify rejected the saved login. Reconnect Spotify to continue.");
+                    }
+                }
                 throw new SpotifyApiError(tokenRequest.statusCode, "Spotify login request failed",
                     typeof tokenRequest.headers["retry-after"] === "string" ? tokenRequest.headers["retry-after"] : undefined);
             }
