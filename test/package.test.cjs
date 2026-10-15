@@ -478,3 +478,24 @@ test('client expiry is rechecked after access refresh completes',async()=>{
   let clientRefreshes=0;client.refreshClient=async()=>{clientRefreshes++;client.clientExpiration=Date.now()+3600000;};
   await client.refresh();assert.equal(clientRefreshes,1);
 });
+
+test('playlist pages resume at the exact cursor and validate revisions, totals, bounds and occurrence IDs', async () => {
+  const client = new Spotify({accessToken:'fixture-token'});
+  client.playlists.queryHash = async () => 'a'.repeat(64);
+  const calls = [];
+  client.request = async (_url, body) => {
+    calls.push(body.variables.offset);
+    return page([item('two'), item('three')], body.variables.offset, 3);
+  };
+  const result = await client.playlists.getPage(id, 1, 2, {snapshotId:'snapshot',total:3});
+  assert.deepEqual(calls,[1]);
+  assert.equal(result.playlist.tracks.length,2);
+  assert.equal(result.nextOffset,null);
+  assert.deepEqual(result.itemUids,['two','three']);
+  await assert.rejects(client.playlists.getPage(id,1,2,{snapshotId:'changed',total:3}),error=>error.statusCode===409);
+  await assert.rejects(client.playlists.getPage(id,1,2,{snapshotId:'snapshot',total:4}),error=>error.statusCode===409);
+  await assert.rejects(client.playlists.getPage(id,-1),/pagination/);
+  await assert.rejects(client.playlists.getPage(id,0,101),/pagination/);
+  client.request = async () => page([item('same'),item('same')],1,3);
+  await assert.rejects(client.playlists.getPage(id,1,2),/invalid playlist page/);
+});

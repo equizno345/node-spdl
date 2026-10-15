@@ -181,6 +181,14 @@ export interface Playlist extends SpotifyObject {
 	snapshotId?: string;
 }
 
+export interface PlaylistPage {
+    playlist: Playlist;
+    offset: number;
+    total: number;
+    itemUids: (string | null)[];
+    nextOffset: number | null;
+}
+
 export interface PlaylistTrack extends Track {
 	addedAt: Date;
 	addedBy: User;

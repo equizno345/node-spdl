@@ -102,6 +102,17 @@ download();
 > The ytdl-core-like syntax only works for the `spdl()` default function and is limited to downloads.
 > To use other API features, you must initialize a `Spotify` class instance.
 
+## Resumable playlist pages
+
+`client.playlists.getPage(url, offset, limit, expected)` returns one validated page:
+`{playlist, offset, total, itemUids, nextOffset}`. The limit is 1–100.
+Persist the returned revision (`playlist.snapshotId`), total and next offset;
+pass `{snapshotId, total}` as `expected` when resuming. A changed revision or
+total rejects with statusCode 409. Occurrence IDs distinguish repeated recordings.
+After the last page, verify the revision again with offset 0 and limit 1 before
+treating the assembled result as a fixed snapshot. The existing `get()` method
+still assembles and validates the complete playlist using this same page method.
+
 ## Formats
 
 > [!NOTE]

@@ -1,7 +1,7 @@
 import { Spotify } from "./client.js";
 import { Endpoints } from "./const.js";
 import { parsePlaylist } from "./parser.js";
-import { Playlist } from "./types.js";
+import { Playlist, PlaylistPage } from "./types.js";
 import { getIdFromQuery } from "./url.js";
 import { SpotifyApiError, SpotifyError } from "./errors.js";
 import undici from "undici";
@@ -20,13 +20,13 @@ export class PlaylistClient {
      * @param query Playlist URL or ID
      * @returns Playlist metadata
      */
-    public async get(query: string): Promise<Playlist> {
+    private async rawPage(query: string, offset: number, limit: number): Promise<any> {
         const id = getIdFromQuery(query);
         if (!/^[a-zA-Z0-9]{22}$/.test(id)) throw new SpotifyError("Invalid Spotify playlist");
         // Cookie-issued tokens belong to the web player, not a developer REST app.
         let hash = await this.queryHash();
         let refreshed = false;
-        const page = async (offset: number, limit = 100): Promise<any> => {
+
             const body = () => ({operationName: "fetchPlaylist", variables: {
                 uri: `spotify:playlist:${id}`, offset, limit, enableWatchFeedEntrypoint: false
             }, extensions: {persistedQuery: {version: 1, sha256Hash: hash}}});
@@ -51,27 +51,42 @@ export class PlaylistClient {
                 !Array.isArray(content?.items) || !Number.isInteger(content.totalCount) || content.totalCount < 0 || content.totalCount > 10000 ||
                 content.pagingInfo?.offset !== offset || content.items.length > limit || content.items.some((item: any) => !item || typeof item !== "object"))
                 throw new SpotifyError("Invalid Spotify playlist response");
-            return playlist;
-        };
-        const playlist = await page(0);
-        const total = playlist.content.totalCount;
-        const items = [...playlist.content.items];
-        let pages = 1;
-        while (items.length < total) {
-            if (!items.length || pages >= 200) throw new SpotifyError("Spotify returned an incomplete playlist");
-            const next = await page(items.length);
-            if (next.revisionId !== playlist.revisionId || next.content.totalCount !== total)
-                throw new SpotifyError("Spotify playlist changed during import. Please refresh again.");
-            if (!next.content.items.length) throw new SpotifyError("Spotify returned an incomplete playlist");
-            items.push(...next.content.items);
-            pages++;
-        }
-        if (items.length !== total) throw new SpotifyError("Spotify returned an incomplete playlist");
-        const uids = items.map(item => item.uid).filter(uid => typeof uid === "string");
+        return playlist;
+    }
+
+    /** One validated web-player page. Persist offset/revision/total to resume without refetching earlier pages. */
+    public async getPage(query: string, offset = 0, limit = 100,
+        expected?: {snapshotId: string; total: number}): Promise<PlaylistPage> {
+        if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100)
+            throw new SpotifyError("Invalid Spotify playlist pagination");
+        const raw = await this.rawPage(query, offset, limit);
+        const total = raw.content.totalCount;
+        if (expected && (raw.revisionId !== expected.snapshotId || total !== expected.total))
+            throw Object.assign(new SpotifyError("Spotify playlist changed during import. Please refresh again."), {statusCode: 409});
+        if (offset > total || offset + raw.content.items.length > total ||
+            (offset < total && !raw.content.items.length))
+            throw new SpotifyError("Spotify returned an incomplete playlist");
+        const itemUids = raw.content.items.map((item: any) => typeof item.uid === "string" ? item.uid : null);
+        const uids = itemUids.filter((uid: string | null) => uid !== null);
         if (new Set(uids).size !== uids.length) throw new SpotifyError("Spotify returned an invalid playlist page");
-        if (pages > 1 && (await page(0, 1)).revisionId !== playlist.revisionId)
-            throw new SpotifyError("Spotify playlist changed during import. Please refresh again.");
-        return parsePlaylist({...playlist, content: {...playlist.content, items}});
+        return {playlist: parsePlaylist(raw), offset, total, itemUids,
+            nextOffset: offset + raw.content.items.length < total ? offset + raw.content.items.length : null};
+    }
+
+    public async get(query: string): Promise<Playlist> {
+        const first = await this.getPage(query);
+        const tracks = [...first.playlist.tracks], uids = first.itemUids.filter(uid => uid !== null);
+        let next = first.nextOffset, pages = 1;
+        while (next !== null) {
+            if (pages++ >= 200) throw new SpotifyError("Spotify returned an incomplete playlist");
+            const page = await this.getPage(query, next, 100, {snapshotId: first.playlist.snapshotId!, total: first.total});
+            tracks.push(...page.playlist.tracks);
+            uids.push(...page.itemUids.filter(uid => uid !== null));
+            next = page.nextOffset;
+        }
+        if (new Set(uids).size !== uids.length) throw new SpotifyError("Spotify returned an invalid playlist page");
+        if (pages > 1) await this.getPage(query, 0, 1, {snapshotId: first.playlist.snapshotId!, total: first.total});
+        return {...first.playlist, tracks};
     }
 
     /** Shared discovery for the existing web-player metadata methods. */
