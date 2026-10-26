@@ -602,6 +602,11 @@ mlly@^1.7.4:
     pkg-types "^1.3.1"
     ufo "^1.6.3"
 
+mp4box@^2.1.1:
+  version "2.5.0"
+  resolved "https://registry.yarnpkg.com/mp4box/-/mp4box-2.5.0.tgz#4379db8eb7d94ad19d0c6e963531ce3b08ff043c"
+  integrity sha512-AK5FQsN5aD2m91HuCGPlRDomDhGxK0o4F8ZVyAbAfcMWBW2QlhZvE0S7v9lBq0Ib4eONq7mT1SBVdrnnIrn4pw==
+
 ms@^2.1.3:
   version "2.1.3"
   resolved "https://registry.yarnpkg.com/ms/-/ms-2.1.3.tgz#574c8138ce1d2b5861f0b44579dbadd60c6615b2"
@@ -729,10 +734,12 @@ rollup@^4.34.8:
     "@rollup/rollup-win32-x64-msvc" "4.64.6"
     fsevents "~2.3.2"
 
-shifro@^0.1.2:
-  version "0.1.2"
-  resolved "https://registry.yarnpkg.com/shifro/-/shifro-0.1.2.tgz#c8cb9d26943c49726a01b3877c4528c5d013587b"
-  integrity sha512-HqeumIgWiaY3ZblR1VVi/f7G+Pi63Ig8P8wmiDWGfsaTa/DFSlNvsSEMIlP+zPp69hoY/3IjXvYsIz9p7pAzQg==
+shifro@0.2.0:
+  version "0.2.0"
+  resolved "https://registry.yarnpkg.com/shifro/-/shifro-0.2.0.tgz#b4120f608c1845b2d3a6c6d004db52286219769f"
+  integrity sha512-6fchUQmUi34tLZ4dvietwmo95JaVUiEVosRpGFnsF58HkDRURNfL8aaUyo785MZiQnheVVR7Sh5z7lyzl6lVQQ==
+  dependencies:
+    mp4box "^2.1.1"
 
 source-map@^0.7.6:
   version "0.7.6"
